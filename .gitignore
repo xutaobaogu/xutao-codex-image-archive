@@ -2,6 +2,10 @@
 __pycache__/
 *.pyc
 *.log
+*.bak
+*.tmp
+*.swp
+config.toml.bak.image-archive.*
 
 # Runtime archives and state should never be committed.
 chat-image-archive/
@@ -10,4 +14,3 @@ manifest.jsonl
 state.json
 state.json.tmp
 original-notify.json
-

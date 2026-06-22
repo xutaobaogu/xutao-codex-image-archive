@@ -11,12 +11,14 @@ STAMP="$(date +%Y%m%d%H%M%S)"
 BACKUP="$CONFIG.bak.image-archive.$STAMP"
 WRAPPER="$BIN_DIR/codex-notify-wrapper"
 RUN_BACKFILL=0
+FORCE_ORIGINAL=0
 
 for arg in "$@"; do
   case "$arg" in
     --backfill) RUN_BACKFILL=1 ;;
+    --force-original) FORCE_ORIGINAL=1 ;;
     *)
-      echo "Usage: install.sh [--backfill]" >&2
+      echo "Usage: install.sh [--backfill] [--force-original]" >&2
       exit 2
       ;;
   esac
@@ -34,28 +36,52 @@ chmod +x "$BIN_DIR/codex-image-archive" "$WRAPPER"
 
 cp "$CONFIG" "$BACKUP"
 
-python3 - "$CONFIG" "$WRAPPER" "$ORIGINAL_NOTIFY_JSON" "$BACKUP" <<'PY'
+python3 - "$CONFIG" "$WRAPPER" "$ORIGINAL_NOTIFY_JSON" "$BACKUP" "$FORCE_ORIGINAL" <<'PY'
+import ast
 import datetime as dt
 import json
 import sys
 from pathlib import Path
 
-try:
-    import tomllib
-except ModuleNotFoundError:
-    import tomli as tomllib
-
 config = Path(sys.argv[1]).expanduser()
 wrapper = str(Path(sys.argv[2]).expanduser())
 original_notify_json = Path(sys.argv[3]).expanduser()
 backup = Path(sys.argv[4]).expanduser()
+force_original = sys.argv[5] == "1"
+
+
+def parse_notify_from_text(text):
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("notify"):
+            continue
+        key, sep, value = stripped.partition("=")
+        if sep and key.strip() == "notify":
+            return ast.literal_eval(value.strip())
+    return None
+
+
+def load_notify(raw_text):
+    try:
+        import tomllib
+
+        return tomllib.loads(raw_text).get("notify")
+    except ModuleNotFoundError:
+        return parse_notify_from_text(raw_text)
+
 
 raw = config.read_bytes()
-parsed = tomllib.loads(raw.decode("utf-8"))
-existing_notify = parsed.get("notify")
+raw_text = raw.decode("utf-8")
+existing_notify = load_notify(raw_text)
 wrapper_notify = [wrapper, "turn-ended"]
 
-if existing_notify != wrapper_notify and isinstance(existing_notify, list):
+should_save_original = (
+    existing_notify != wrapper_notify
+    and isinstance(existing_notify, list)
+    and (force_original or not original_notify_json.exists())
+)
+
+if should_save_original:
     original_notify_json.parent.mkdir(parents=True, exist_ok=True)
     original_notify_json.write_text(
         json.dumps(
@@ -72,7 +98,7 @@ if existing_notify != wrapper_notify and isinstance(existing_notify, list):
     )
 
 replacement = f'notify = [{json.dumps(wrapper)}, "turn-ended"]'
-lines = raw.decode("utf-8").splitlines()
+lines = raw_text.splitlines()
 for index, line in enumerate(lines):
     if line.startswith("notify = "):
         lines[index] = replacement
@@ -91,4 +117,3 @@ echo "Archive root: $ARCHIVE_ROOT"
 if [ "$RUN_BACKFILL" -eq 1 ]; then
   "$BIN_DIR/codex-image-archive" backfill
 fi
-

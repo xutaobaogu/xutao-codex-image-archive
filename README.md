@@ -15,9 +15,16 @@ images into a durable local archive.
 
 The archive is local only. It does not upload images or commit them to Git.
 
-## Install The Skill
+## Install From GitHub
 
-Clone this repository, then copy the skill folder into Codex:
+Clone the repository:
+
+```bash
+git clone https://github.com/xutaobaogu/xutao-codex-image-archive.git
+cd xutao-codex-image-archive
+```
+
+Copy the skill folder into Codex:
 
 ```bash
 mkdir -p ~/.codex/skills
@@ -30,7 +37,13 @@ Install the global archive hook:
 ~/.codex/skills/xutao-codex-image-archive/scripts/install.sh
 ```
 
-Optionally backfill existing recoverable images:
+Optionally install and backfill existing recoverable images in one step:
+
+```bash
+~/.codex/skills/xutao-codex-image-archive/scripts/install.sh --backfill
+```
+
+Or backfill later:
 
 ```bash
 ~/.codex/bin/codex-image-archive backfill
@@ -64,12 +77,16 @@ The manifest is written to:
 The uninstall script restores the original Codex `notify` command when it was
 saved during install. It does not delete archived images.
 
-## Publish To GitHub
+## Update
 
-After creating a GitHub repository named `xutao-codex-image-archive`:
+Pull the latest version and copy the skill folder again:
 
 ```bash
-git remote add origin https://github.com/YOUR_USERNAME/xutao-codex-image-archive.git
-git push -u origin main
+cd xutao-codex-image-archive
+git pull
+cp -R skill ~/.codex/skills/xutao-codex-image-archive
 ```
 
+Then run `install.sh` again if you want to update the global hook scripts. The
+installer keeps the first saved original `notify` command unless you pass
+`--force-original`.
