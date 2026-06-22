@@ -1,0 +1,54 @@
+---
+name: xutao-codex-image-archive
+description: Install, verify, operate, or troubleshoot a global Codex chat image archive that preserves pasted clipboard images and image attachments from Codex session logs across projects and conversations.
+metadata:
+  short-description: Archive pasted Codex chat images
+---
+
+# xutao Codex Image Archive
+
+Use this skill when the user wants Codex chat images, clipboard screenshots, or image attachments preserved across projects and sessions.
+
+## Workflow
+
+1. Inspect whether the archive is already installed:
+   - Check `$CODEX_HOME/bin/codex-image-archive`, defaulting to `~/.codex/bin/codex-image-archive`.
+   - Check `$CODEX_HOME/config.toml` for `codex-notify-wrapper`.
+2. Install or update with `scripts/install.sh`.
+3. Run `codex-image-archive report` before backfilling when the user wants a dry-run.
+4. Run `codex-image-archive backfill` when the user wants old recoverable images saved.
+5. Run `codex-image-archive recent` to verify the notify-time workflow.
+
+## Commands
+
+From this skill directory:
+
+```bash
+scripts/install.sh
+scripts/install.sh --backfill
+scripts/uninstall.sh
+```
+
+After installation:
+
+```bash
+~/.codex/bin/codex-image-archive report
+~/.codex/bin/codex-image-archive recent
+~/.codex/bin/codex-image-archive backfill
+```
+
+## Behavior
+
+- Archive root defaults to `~/.codex/chat-image-archive/`.
+- Set `CODEX_IMAGE_ARCHIVE_ROOT` to override the archive location.
+- The installer saves the existing Codex `notify` command in `original-notify.json`.
+- The wrapper calls the original notify command first, then runs `codex-image-archive recent`.
+- The archiver deduplicates by SHA-256 and writes `manifest.jsonl` plus `state.json`.
+
+## Safety
+
+- Do not commit user archives, manifests, logs, state files, or images.
+- Always preserve unrelated `config.toml` settings.
+- If `config.toml` cannot be parsed, stop and report the error instead of overwriting it.
+- Uninstall should restore the saved original notify command; it should not delete archived images.
+

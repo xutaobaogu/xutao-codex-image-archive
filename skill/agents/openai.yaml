@@ -1,0 +1,7 @@
+interface:
+  display_name: "xutao Codex Image Archive"
+  short_description: "Archive pasted Codex chat images locally"
+  default_prompt: "Use $xutao-codex-image-archive to install or verify my global Codex chat image archive."
+policy:
+  allow_implicit_invocation: true
+

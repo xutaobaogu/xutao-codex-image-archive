@@ -1,0 +1,37 @@
+#!/usr/bin/env zsh
+set -u
+
+CODEX_HOME="${CODEX_HOME:-$HOME/.codex}"
+ARCHIVE_ROOT="${CODEX_IMAGE_ARCHIVE_ROOT:-$CODEX_HOME/chat-image-archive}"
+ORIGINAL_NOTIFY_JSON="$ARCHIVE_ROOT/original-notify.json"
+ARCHIVER="$CODEX_HOME/bin/codex-image-archive"
+LOG_DIR="$ARCHIVE_ROOT/logs"
+LOG_FILE="$LOG_DIR/archive.log"
+
+mkdir -p "$LOG_DIR" 2>/dev/null || true
+
+if [ -f "$ORIGINAL_NOTIFY_JSON" ]; then
+  python3 - "$ORIGINAL_NOTIFY_JSON" >>"$LOG_FILE" 2>&1 <<'PY' || true
+import json
+import subprocess
+import sys
+
+path = sys.argv[1]
+try:
+    with open(path, "r", encoding="utf-8") as handle:
+        notify = json.load(handle).get("notify") or []
+except Exception as exc:
+    print(f"original notify load failed: {exc!r}", file=sys.stderr)
+    raise SystemExit(0)
+
+if isinstance(notify, list) and notify:
+    subprocess.run([str(item) for item in notify], check=False)
+PY
+fi
+
+if [ -x "$ARCHIVER" ]; then
+  "$ARCHIVER" recent >>"$LOG_FILE" 2>&1 || true
+fi
+
+exit 0
+

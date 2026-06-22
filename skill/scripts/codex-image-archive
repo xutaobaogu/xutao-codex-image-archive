@@ -1,0 +1,359 @@
+#!/usr/bin/env python3
+import argparse
+import base64
+import datetime as dt
+import hashlib
+import json
+import os
+import re
+import shutil
+import sys
+from pathlib import Path
+
+
+CODEX_HOME = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex")).expanduser()
+ARCHIVE_ROOT = Path(os.environ.get("CODEX_IMAGE_ARCHIVE_ROOT", CODEX_HOME / "chat-image-archive")).expanduser()
+SESSIONS_ROOT = CODEX_HOME / "sessions"
+MANIFEST_PATH = ARCHIVE_ROOT / "manifest.jsonl"
+STATE_PATH = ARCHIVE_ROOT / "state.json"
+LOG_PATH = ARCHIVE_ROOT / "logs" / "archive.log"
+
+CLIPBOARD_RE = re.compile(r"(/(?:private/)?var/folders/[^\"'\s>]+/codex-clipboard-[0-9a-fA-F-]+\.(?:png|jpg|jpeg|webp|gif))")
+DATA_URL_RE = re.compile(r"^data:image/([a-zA-Z0-9.+-]+);base64,(.*)$", re.DOTALL)
+SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
+
+
+def utc_now():
+    return dt.datetime.now(dt.timezone.utc)
+
+
+def log(message):
+    LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    stamp = utc_now().isoformat(timespec="seconds")
+    with LOG_PATH.open("a", encoding="utf-8") as handle:
+        handle.write(f"{stamp} {message}\n")
+
+
+def load_state():
+    if not STATE_PATH.exists():
+        return {"version": 1, "sessions": {}, "images": {}}
+    try:
+        with STATE_PATH.open("r", encoding="utf-8") as handle:
+            state = json.load(handle)
+    except Exception as exc:
+        log(f"warning state_load_failed error={exc!r}")
+        return {"version": 1, "sessions": {}, "images": {}}
+    state.setdefault("version", 1)
+    state.setdefault("sessions", {})
+    state.setdefault("images", {})
+    return state
+
+
+def save_state(state):
+    ARCHIVE_ROOT.mkdir(parents=True, exist_ok=True)
+    tmp_path = STATE_PATH.with_suffix(".json.tmp")
+    with tmp_path.open("w", encoding="utf-8") as handle:
+        json.dump(state, handle, ensure_ascii=False, indent=2, sort_keys=True)
+        handle.write("\n")
+    tmp_path.replace(STATE_PATH)
+
+
+def session_files(mode, limit):
+    files = list(SESSIONS_ROOT.glob("**/rollout-*.jsonl"))
+    files.sort(key=lambda p: p.stat().st_mtime if p.exists() else 0, reverse=True)
+    if mode == "recent":
+        return files[:limit]
+    return files
+
+
+def parse_timestamp(value):
+    if not value:
+        return utc_now()
+    try:
+        if value.endswith("Z"):
+            value = value[:-1] + "+00:00"
+        parsed = dt.datetime.fromisoformat(value)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=dt.timezone.utc)
+        return parsed.astimezone(dt.timezone.utc)
+    except Exception:
+        return utc_now()
+
+
+def safe_name(name):
+    name = SAFE_NAME_RE.sub("_", name).strip("._")
+    return name or "image.png"
+
+
+def data_url_bytes(data_url):
+    if not data_url:
+        return None, None
+    match = DATA_URL_RE.match(data_url)
+    if not match:
+        return None, None
+    ext = match.group(1).lower().replace("jpeg", "jpg")
+    try:
+        return base64.b64decode(match.group(2), validate=True), ext
+    except Exception:
+        return None, None
+
+
+def sha256_bytes(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+def write_manifest(record):
+    ARCHIVE_ROOT.mkdir(parents=True, exist_ok=True)
+    with MANIFEST_PATH.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+
+
+def stat_signature(path):
+    try:
+        stat = path.stat()
+        return {"mtime_ns": stat.st_mtime_ns, "size": stat.st_size}
+    except FileNotFoundError:
+        return None
+
+
+def extract_candidates(session_path):
+    session_id = None
+    session_cwd = None
+    current_turn_id = None
+    current_cwd = None
+    candidates = []
+
+    with session_path.open("r", encoding="utf-8", errors="replace") as handle:
+        for line_no, line in enumerate(handle, start=1):
+            try:
+                event = json.loads(line)
+            except Exception:
+                continue
+
+            timestamp = event.get("timestamp")
+            event_type = event.get("type")
+            payload = event.get("payload") or {}
+
+            if event_type == "session_meta":
+                meta = payload
+                session_id = meta.get("id") or session_id
+                session_cwd = meta.get("cwd") or session_cwd
+                continue
+
+            if event_type == "turn_context":
+                current_turn_id = payload.get("turn_id") or current_turn_id
+                current_cwd = payload.get("cwd") or current_cwd
+                continue
+
+            if event_type == "event_msg":
+                local_images = payload.get("local_images") or []
+                for image_path in local_images:
+                    candidates.append(
+                        {
+                            "local_path": image_path,
+                            "data_url": None,
+                            "timestamp": timestamp,
+                            "session_id": session_id,
+                            "turn_id": current_turn_id,
+                            "cwd": current_cwd or session_cwd,
+                            "session_file": str(session_path),
+                            "line": line_no,
+                        }
+                    )
+                continue
+
+            if event_type != "response_item":
+                continue
+
+            if payload.get("type") != "message" or payload.get("role") != "user":
+                continue
+
+            content = payload.get("content") or []
+            pending_paths = []
+            for item in content:
+                if not isinstance(item, dict):
+                    continue
+                item_type = item.get("type")
+                if item_type == "input_text":
+                    text = item.get("text") or ""
+                    for match in CLIPBOARD_RE.findall(text):
+                        pending_paths.append(match)
+                elif item_type == "input_image":
+                    data_url = item.get("image_url")
+                    local_path = pending_paths.pop(0) if pending_paths else None
+                    candidates.append(
+                        {
+                            "local_path": local_path,
+                            "data_url": data_url,
+                            "timestamp": timestamp,
+                            "session_id": session_id,
+                            "turn_id": current_turn_id,
+                            "cwd": current_cwd or session_cwd,
+                            "session_file": str(session_path),
+                            "line": line_no,
+                        }
+                    )
+
+            for image_path in pending_paths:
+                candidates.append(
+                    {
+                        "local_path": image_path,
+                        "data_url": None,
+                        "timestamp": timestamp,
+                        "session_id": session_id,
+                        "turn_id": current_turn_id,
+                        "cwd": current_cwd or session_cwd,
+                        "session_file": str(session_path),
+                        "line": line_no,
+                    }
+                )
+
+    return candidates
+
+
+def bytes_from_candidate(candidate):
+    local_path = candidate.get("local_path")
+    if local_path:
+        path = Path(local_path)
+        if path.exists() and path.is_file():
+            try:
+                return path.read_bytes(), path.suffix.lower().lstrip(".") or "png", "file"
+            except Exception as exc:
+                log(f"warning source_read_failed path={path} error={exc!r}")
+
+    data, ext = data_url_bytes(candidate.get("data_url"))
+    if data:
+        return data, ext or "png", "base64"
+    return None, None, "missing"
+
+
+def archive_candidate(candidate, state, dry_run):
+    data, ext, method = bytes_from_candidate(candidate)
+    if data is None:
+        return {"status": "missing", "method": method}
+
+    digest = sha256_bytes(data)
+    existing = state["images"].get(digest)
+    if existing:
+        return {"status": "duplicate", "sha256": digest, "archive_path": existing.get("archive_path"), "method": method}
+
+    timestamp = parse_timestamp(candidate.get("timestamp"))
+    session_id = candidate.get("session_id") or "unknown-session"
+    turn_id = candidate.get("turn_id") or "unknown-turn"
+    original = Path(candidate.get("local_path") or f"embedded.{ext}").name
+    original = safe_name(original)
+    archive_dir = ARCHIVE_ROOT / "images" / timestamp.strftime("%Y") / timestamp.strftime("%m") / timestamp.strftime("%d") / safe_name(session_id)
+    archive_name = f"{safe_name(turn_id)}_{digest[:12]}_{original}"
+    if not archive_name.lower().endswith((".png", ".jpg", ".jpeg", ".webp", ".gif")):
+        archive_name = f"{archive_name}.{ext or 'png'}"
+    archive_path = archive_dir / archive_name
+
+    record = {
+        "archived_at": utc_now().isoformat(timespec="seconds"),
+        "archive_path": str(archive_path),
+        "cwd": candidate.get("cwd"),
+        "method": method,
+        "original_path": candidate.get("local_path"),
+        "session_file": candidate.get("session_file"),
+        "session_id": session_id,
+        "sha256": digest,
+        "size": len(data),
+        "source_line": candidate.get("line"),
+        "timestamp": candidate.get("timestamp"),
+        "turn_id": turn_id,
+    }
+
+    if dry_run:
+        return {"status": "would_archive", "sha256": digest, "archive_path": str(archive_path), "method": method}
+
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    if method == "file" and candidate.get("local_path"):
+        shutil.copy2(candidate["local_path"], archive_path)
+    else:
+        archive_path.write_bytes(data)
+
+    state["images"][digest] = {
+        "archive_path": str(archive_path),
+        "first_seen": record["archived_at"],
+        "session_id": session_id,
+    }
+    write_manifest(record)
+    return {"status": "archived", "sha256": digest, "archive_path": str(archive_path), "method": method}
+
+
+def process(mode, limit):
+    dry_run = mode == "report"
+    scan_mode = "backfill" if mode in ("backfill", "report") else "recent"
+    state = load_state()
+    counts = {
+        "sessions_scanned": 0,
+        "candidates": 0,
+        "archived": 0,
+        "would_archive": 0,
+        "duplicates": 0,
+        "missing": 0,
+        "errors": 0,
+    }
+
+    for session_path in session_files(scan_mode, limit):
+        signature = stat_signature(session_path)
+        state_key = str(session_path)
+        if mode == "recent" and state["sessions"].get(state_key) == signature:
+            continue
+        counts["sessions_scanned"] += 1
+
+        try:
+            candidates = extract_candidates(session_path)
+        except Exception as exc:
+            counts["errors"] += 1
+            log(f"error session_parse_failed path={session_path} error={exc!r}")
+            continue
+
+        counts["candidates"] += len(candidates)
+        for candidate in candidates:
+            try:
+                result = archive_candidate(candidate, state, dry_run)
+            except Exception as exc:
+                counts["errors"] += 1
+                log(f"error candidate_archive_failed session={session_path} error={exc!r}")
+                continue
+
+            status = result["status"]
+            if status == "archived":
+                counts["archived"] += 1
+            elif status == "would_archive":
+                counts["would_archive"] += 1
+            elif status == "duplicate":
+                counts["duplicates"] += 1
+            elif status == "missing":
+                counts["missing"] += 1
+
+        if not dry_run and signature is not None:
+            state["sessions"][state_key] = signature
+
+    if not dry_run:
+        save_state(state)
+    return counts
+
+
+def main(argv):
+    parser = argparse.ArgumentParser(description="Archive Codex clipboard images from session logs.")
+    parser.add_argument("command", choices=["backfill", "recent", "report"], help="Archive mode.")
+    parser.add_argument("--recent-limit", type=int, default=int(os.environ.get("CODEX_IMAGE_ARCHIVE_RECENT_LIMIT", "50")))
+    args = parser.parse_args(argv)
+
+    try:
+        counts = process(args.command, args.recent_limit)
+    except Exception as exc:
+        log(f"fatal command={args.command} error={exc!r}")
+        print(f"codex-image-archive: fatal: {exc}", file=sys.stderr)
+        return 1
+
+    summary = " ".join(f"{key}={value}" for key, value in counts.items())
+    print(summary)
+    log(f"command={args.command} {summary}")
+    return 0 if counts["errors"] == 0 else 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))
