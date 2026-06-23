@@ -74,6 +74,14 @@ Install and backfill existing recoverable images in one step:
 
 ## Verify / 验证
 
+After you open Codex, run one repair pass to restore missing historical images:
+
+```bash
+~/.codex/bin/codex-image-archive repair
+```
+
+每次打开 Codex 后先执行一次 `repair`，会把历史会话里缺失的 `/var/folders/.../codex-clipboard-*.png` 图片补回。
+
 Check what can be archived:
 
 ```bash
@@ -84,6 +92,12 @@ Run the recent-session archiver:
 
 ```bash
 ~/.codex/bin/codex-image-archive recent
+```
+
+Repair specific missing image paths in historical sessions:
+
+```bash
+~/.codex/bin/codex-image-archive repair
 ```
 
 Backfill old recoverable sessions:

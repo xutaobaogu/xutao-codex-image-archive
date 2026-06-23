@@ -108,6 +108,38 @@ def write_manifest(record):
         handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
 
 
+def load_manifest_records():
+    if not MANIFEST_PATH.exists():
+        return []
+
+    records = []
+    with MANIFEST_PATH.open("a+", encoding="utf-8") as handle:
+        handle.seek(0)
+        for line in handle:
+            try:
+                records.append(json.loads(line))
+            except Exception as exc:
+                log(f"warning manifest_parse_failed error={exc!r}")
+    return records
+
+
+def build_repair_index(records):
+    by_local = {}
+    by_turn = {}
+
+    for record in records:
+        original = (record.get("original_path") or "").strip()
+        if original:
+            by_local[original] = record
+
+        session_id = (record.get("session_id") or "").strip()
+        turn_id = (record.get("turn_id") or "").strip()
+        if session_id and turn_id and original:
+            by_turn[(session_id, turn_id)] = record
+
+    return by_local, by_turn
+
+
 def stat_signature(path):
     try:
         stat = path.stat()
@@ -281,9 +313,51 @@ def archive_candidate(candidate, state, dry_run):
     return {"status": "archived", "sha256": digest, "archive_path": str(archive_path), "method": method}
 
 
+def repair_candidate(candidate, manifest_by_local, manifest_by_turn):
+    local_path = candidate.get("local_path")
+    if not local_path:
+        return {"status": "no_local_path"}
+
+    target = Path(local_path)
+    if target.exists() and target.is_file():
+        return {"status": "exists"}
+
+    record = manifest_by_local.get(local_path)
+    if not record and candidate.get("session_id") and candidate.get("turn_id"):
+        record = manifest_by_turn.get((candidate.get("session_id"), candidate.get("turn_id")))
+
+    source_path = record.get("archive_path") if isinstance(record, dict) else None
+    if source_path:
+        source = Path(source_path)
+        if source.exists() and source.is_file():
+            try:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, target)
+                return {"status": "repaired", "method": "restore", "source": source_path}
+            except Exception as exc:
+                log(f"warning repair_copy_failed target={target} source={source} error={exc!r}")
+
+    data, _ext, _method = bytes_from_candidate(candidate)
+    if data is not None:
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(data)
+            return {"status": "repaired", "method": "base64", "source": "embedded"}
+        except Exception as exc:
+            log(f"warning repair_write_failed target={target} error={exc!r}")
+
+    return {"status": "repair_failed"}
+
+
 def process(mode, limit):
+    manifest_records = load_manifest_records() if mode == "repair" else None
+    manifest_by_local = {}
+    manifest_by_turn = {}
+    if mode == "repair":
+        manifest_by_local, manifest_by_turn = build_repair_index(manifest_records)
+
     dry_run = mode == "report"
-    scan_mode = "backfill" if mode in ("backfill", "report") else "recent"
+    scan_mode = "backfill" if mode in ("backfill", "report", "repair") else "recent"
     state = load_state()
     counts = {
         "sessions_scanned": 0,
@@ -292,6 +366,10 @@ def process(mode, limit):
         "would_archive": 0,
         "duplicates": 0,
         "missing": 0,
+        "repaired": 0,
+        "existing": 0,
+        "repair_failed": 0,
+        "no_local_path": 0,
         "errors": 0,
     }
 
@@ -312,7 +390,10 @@ def process(mode, limit):
         counts["candidates"] += len(candidates)
         for candidate in candidates:
             try:
-                result = archive_candidate(candidate, state, dry_run)
+                if mode == "repair":
+                    result = repair_candidate(candidate, manifest_by_local, manifest_by_turn)
+                else:
+                    result = archive_candidate(candidate, state, dry_run)
             except Exception as exc:
                 counts["errors"] += 1
                 log(f"error candidate_archive_failed session={session_path} error={exc!r}")
@@ -327,6 +408,14 @@ def process(mode, limit):
                 counts["duplicates"] += 1
             elif status == "missing":
                 counts["missing"] += 1
+            elif status == "repaired":
+                counts["repaired"] += 1
+            elif status == "exists":
+                counts["existing"] += 1
+            elif status == "repair_failed":
+                counts["repair_failed"] += 1
+            elif status == "no_local_path":
+                counts["no_local_path"] += 1
 
         if not dry_run and signature is not None:
             state["sessions"][state_key] = signature
@@ -338,7 +427,7 @@ def process(mode, limit):
 
 def main(argv):
     parser = argparse.ArgumentParser(description="Archive Codex clipboard images from session logs.")
-    parser.add_argument("command", choices=["backfill", "recent", "report"], help="Archive mode.")
+    parser.add_argument("command", choices=["backfill", "recent", "report", "repair"], help="Archive mode.")
     parser.add_argument("--recent-limit", type=int, default=int(os.environ.get("CODEX_IMAGE_ARCHIVE_RECENT_LIMIT", "50")))
     args = parser.parse_args(argv)
 

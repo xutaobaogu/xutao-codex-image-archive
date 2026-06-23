@@ -16,6 +16,7 @@ Use this skill when the user wants Codex chat images, clipboard screenshots, or 
 3. Run `codex-image-archive report` before backfilling when the user wants a dry-run.
 4. Run `codex-image-archive backfill` when the user wants old recoverable images saved.
 5. Run `codex-image-archive recent` to verify the notify-time workflow.
+6. Run `codex-image-archive repair` when old sessions have missing `/var/folders/...` image paths.
 
 ## Commands
 
@@ -26,6 +27,7 @@ scripts/install.sh
 scripts/install.sh --backfill
 scripts/install.sh --force-original
 scripts/uninstall.sh
+~/.codex/bin/codex-image-archive repair
 ```
 
 After installation:
@@ -34,6 +36,7 @@ After installation:
 ~/.codex/bin/codex-image-archive report
 ~/.codex/bin/codex-image-archive recent
 ~/.codex/bin/codex-image-archive backfill
+~/.codex/bin/codex-image-archive repair
 ```
 
 ## Behavior

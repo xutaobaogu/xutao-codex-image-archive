@@ -44,6 +44,12 @@ cp -R skill ~/.codex/skills/xutao-codex-image-archive
 ~/.codex/skills/xutao-codex-image-archive/scripts/install.sh --backfill
 ```
 
+打开 Codex 后，可先执行一次修复，恢复历史会话里被清理掉的临时图片路径：
+
+```bash
+~/.codex/bin/codex-image-archive repair
+```
+
 ## 常用命令
 
 查看可恢复情况，不复制图片：
@@ -56,6 +62,12 @@ cp -R skill ~/.codex/skills/xutao-codex-image-archive
 
 ```bash
 ~/.codex/bin/codex-image-archive recent
+```
+
+修复历史会话里已被清理的 `codex-clipboard-*.png`：
+
+```bash
+~/.codex/bin/codex-image-archive repair
 ```
 
 补归档所有历史会话：
